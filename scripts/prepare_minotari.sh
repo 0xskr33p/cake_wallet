@@ -1,5 +1,5 @@
-# Intended to be sourced from any POSIX-like shell:
-#   . scripts/prepare_minotari.sh [--update]
+# Run from the Cake Wallet root:
+#   bash scripts/prepare_minotari.sh [--update]
 
 #######################################
 # Safety
@@ -41,7 +41,9 @@ SCRIPTS_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPTS_DIR/.." && pwd)"
 CW_PARENT_DIR="$PROJECT_ROOT/cw_minotari"
 CW_RUST_DIR="$CW_PARENT_DIR/rust"
-CW_REPO_URL="https://github.com/tari-project/cw_tari_wallet.git"
+CW_REPO_URL="https://github.com/0xskr33p/cw_tari_wallet.git"
+# Update this pin after pushing the corresponding wrapper changes.
+CW_REPO_REV="f47549f9978df4d7cb937ab35a37c5c674535b80"
 
 
 #######################################
@@ -56,17 +58,21 @@ if [ "$UPDATE_CW" -eq 1 ] && [ -d "$CW_RUST_DIR" ]; then
 fi
 
 if [ ! -d "$CW_RUST_DIR" ]; then
-  git clone "$CW_REPO_URL" "$CW_RUST_DIR"
+  git clone "$CW_REPO_URL" "$CW_RUST_DIR" || { return 1 2>/dev/null || exit 1; }
 fi
 
 #######################################
-# Build Rust code
+# Select the pinned wrapper and build Rust code
 #######################################
 
 (
   cd "$CW_RUST_DIR" || exit 1
-  cargo build
-)
+  if ! git cat-file -e "${CW_REPO_REV}^{commit}" 2>/dev/null; then
+    git fetch "$CW_REPO_URL" "$CW_REPO_REV" || exit 1
+  fi
+  git checkout --detach "$CW_REPO_REV" || exit 1
+  cargo build --locked
+) || { return 1 2>/dev/null || exit 1; }
 
 #######################################
 # Flutter Rust Bridge codegen
