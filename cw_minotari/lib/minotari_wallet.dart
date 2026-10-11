@@ -616,6 +616,7 @@ abstract class MinotariWalletBase
       height: txDto.blockchain.blockHeight.toInt(),
       confirmations: txDto.blockchain.confirmations.toInt(),
       payrefs: txDto.payrefs,
+      isTestnet: isTestnet,
     );
 
     txInfo.additionalInfo['source'] = txDto.source.name;

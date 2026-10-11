@@ -561,7 +561,11 @@ abstract class TransactionDetailsViewModelBase with Store {
       case WalletType.zcash:
         return "https://blockchair.com/zcash/transaction/${txId}";
       case WalletType.minotari:
-        return 'https://explore.tari.com/search?hash=${txId}';
+        if (["reorganized", "cancelled", "rejected"]
+            .contains(transactionInfo.additionalInfo["status"])) {
+          return "";
+        }
+        return transactionInfo.additionalInfo["explorerUrl"] as String? ?? "";
       case WalletType.none:
         return "";
     }
@@ -569,7 +573,10 @@ abstract class TransactionDetailsViewModelBase with Store {
 
   String get explorerDescription => S.current.view_transaction_on + Uri.parse(_explorerUrl).host;
 
+  bool get hasExplorer => wallet.type != WalletType.minotari || _explorerUrl.isNotEmpty;
+
   void launchExplorer() {
+    if (!hasExplorer) return;
     launchUrl(Uri.parse(_explorerUrl));
   }
 
