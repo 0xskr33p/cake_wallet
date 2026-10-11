@@ -58,12 +58,9 @@ bool _hasMinotariCounterparty(TransactionDetailsViewModelBase vm) =>
     vm.wallet.type == WalletType.minotari &&
     vm.transactionInfo.additionalInfo["counterpartyAddress"] != null;
 
-/// Minotari surfaces the counterparty as an address plus an optional emoji ID.
-String _minotariCounterparty(TransactionDetailsViewModelBase vm) {
-  final address = vm.transactionInfo.additionalInfo["counterpartyAddress"] as String? ?? "";
-  final emoji = vm.transactionInfo.additionalInfo["counterpartyEmoji"] as String?;
-  return emoji != null ? "$emoji $address" : address;
-}
+/// Display and copy the Base58 encoding of the Minotari counterparty address.
+String _minotariCounterparty(TransactionDetailsViewModelBase vm) =>
+    vm.transactionInfo.additionalInfo["counterpartyAddress"] as String? ?? "";
 
 String _minotariInfo(TransactionDetailsViewModelBase vm, String field) =>
     vm.transactionInfo.additionalInfo[field] as String? ?? "";
@@ -287,7 +284,9 @@ class TxDetailRowDefinition {
     TxDetailRowDefinition(
       keyString: "standard_list_item_transaction_details_id_key",
       title: S.current.transaction_details_transaction_id,
-      valueGetter: (vm) => vm.transactionInfo.txHash,
+      valueGetter: (vm) => vm.wallet.type == WalletType.minotari
+          ? vm.transactionInfo.id
+          : vm.transactionInfo.txHash,
     ),
   ];
 }
@@ -478,6 +477,7 @@ abstract class TransactionDetailsViewModelBase with Store {
       case WalletType.zano:
         return 10;
       case WalletType.wownero:
+      case WalletType.minotari:
         return 3;
       case WalletType.litecoin:
         final isPegOut = (transactionInfo.additionalInfo["isPegOut"] as bool?) ?? false;

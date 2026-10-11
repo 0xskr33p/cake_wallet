@@ -94,6 +94,7 @@ class TransactionListItem extends ActionListItem with Keyable {
       case WalletType.zano:
         return 10;
       case WalletType.wownero:
+      case WalletType.minotari:
         return 3;
       case WalletType.litecoin:
         bool isPegOut = (transaction.additionalInfo["isPegOut"] as bool?) ?? false;
