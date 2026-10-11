@@ -56,6 +56,10 @@ class TransactionListItem extends ActionListItem with Keyable {
   }
 
   String get formattedTitle {
+    if (balanceViewModel.wallet.type == WalletType.minotari) {
+      final status = transaction.additionalInfo['historyStatus'] as String?;
+      if (status != null) return status;
+    }
     if (balanceViewModel.wallet.type == WalletType.bitcoin &&
         transaction.additionalInfo['hasMissingInputTx'] == true) {
       return 'Transaction has missing data';
@@ -116,6 +120,7 @@ class TransactionListItem extends ActionListItem with Keyable {
         }
         break;
       case WalletType.wownero:
+      case WalletType.minotari:
         if (transaction.confirmations >= 0 && transaction.confirmations < 3) {
           return ' (${transaction.confirmations}/3)';
         }
@@ -154,6 +159,7 @@ class TransactionListItem extends ActionListItem with Keyable {
       WalletType.wownero,
       WalletType.litecoin,
       WalletType.zano,
+      WalletType.minotari,
     ].contains(balanceViewModel.wallet.type)) {
       return formattedPendingStatus;
     }

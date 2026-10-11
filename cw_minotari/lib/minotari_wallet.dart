@@ -15,6 +15,8 @@ import 'package:cw_core/wallet_info.dart';
 import 'package:cw_core/wallet_keys_file.dart';
 import 'package:cw_minotari/minotari_balance.dart';
 import 'package:cw_minotari/minotari_ffi.dart';
+import 'package:cw_minotari/minotari_sync_loop.dart';
+import 'package:cw_minotari/minotari_transaction_status.dart';
 import 'package:cw_minotari/minotari_transaction_history.dart';
 import 'package:cw_minotari/minotari_transaction_info.dart';
 import 'package:cw_minotari/minotari_transaction_priority.dart';
@@ -61,7 +63,16 @@ abstract class MinotariWalletBase
 
   MinotariFfi? _ffi;
   bool _isTransactionUpdating;
-  StreamSubscription<ScanEventDto>? _scannerSubscription;
+  late final _syncLoop = MinotariSyncLoop<ScanEventDto>(
+    scan: _openScan,
+    onEvent: _handleScanEvent,
+    refresh: _refreshAfterScan,
+    onSynced: () => syncStatus = SyncedSyncStatus(),
+    onError: (error, stack) {
+      printV('Minotari sync cycle failed: $error');
+      syncStatus = FailedSyncStatus();
+    },
+  );
   Node? _currentNode;
   int _chainTipHeight = 0;
   int _initialSyncHeight = 0;
@@ -144,6 +155,7 @@ abstract class MinotariWalletBase
   @override
   Future<void> connectToNode({required Node node}) async {
     try {
+      await _stopSync();
       syncStatus = ConnectingSyncStatus();
 
       // Store the node for later use
@@ -161,78 +173,53 @@ abstract class MinotariWalletBase
 
   @override
   Future<void> startSync() async {
-    try {
-      syncStatus = AttemptingSyncStatus();
-
-      // Cancel any existing scanner subscription
-      await _scannerSubscription?.cancel();
-
-      // Get the node URL (with protocol) from current node
-      if (_currentNode == null) {
-        throw Exception('No node connected. Call connectToNode first.');
-      }
-
-      final nodeUrl = _currentNode!.uri.toString();
-
-      // Fetch chain tip height for progress calculation
-      try {
-        final tipInfo = await getTipInfo(baseUrl: nodeUrl);
-        if (tipInfo != null) {
-          _chainTipHeight = tipInfo.bestBlockHeight.toInt();
-        }
-      } catch (e) {
-        printV('Error fetching chain tip: $e');
-      }
-
-      // Start the scanner stream
-      final scanStream = _ffi?.startScan(
-        baseNodeAddress: nodeUrl,
-        passphrase: passphrase ?? '',
-        continuous: false, // One-time sync
-      );
-
-      if (scanStream == null) {
-        throw Exception('Scanner not initialized');
-      }
-
-      // Listen to scan events
-      _scannerSubscription = scanStream.listen(
-        (event) {
-          try {
-            _handleScanEvent(event);
-          } catch (e) {
-            printV('Error handling scan event: $e');
-            syncStatus = FailedSyncStatus();
-          }
-        },
-        onError: (error) {
-          printV('Scanner stream error: $error');
-          syncStatus = FailedSyncStatus();
-        },
-        onDone: () async {
-          // Scan completed, update balance and transactions
-          try {
-            await updateBalance();
-            await updateTransactions();
-            syncStatus = SyncedSyncStatus();
-          } catch (e) {
-            printV('Error updating after scan: $e');
-            syncStatus = FailedSyncStatus();
-          }
-        },
-        cancelOnError: true, // Stop listening after an error
-      );
-
-      syncStatus = SyncronizingSyncStatus();
-    } catch (e) {
-      printV('Error starting sync: $e');
+    if (_currentNode == null || _ffi == null) {
       syncStatus = FailedSyncStatus();
-      // Don't rethrow - we've already set FailedSyncStatus
+      return;
     }
+    await _syncLoop.start();
+  }
+
+  Future<Stream<ScanEventDto>> _openScan(bool Function() isCurrent) async {
+    syncStatus = AttemptingSyncStatus();
+    final nodeUrl = _currentNode!.uri.toString();
+    try {
+      final tipInfo = await getTipInfo(baseUrl: nodeUrl);
+      if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+      if (tipInfo != null) _chainTipHeight = tipInfo.bestBlockHeight.toInt();
+    } catch (e) {
+      printV('Error fetching chain tip: $e');
+    }
+    if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+    final stream = _ffi!.startScan(
+      baseNodeAddress: nodeUrl,
+      passphrase: passphrase ?? '',
+      continuous: false,
+    );
+    syncStatus = SyncronizingSyncStatus();
+    return stream;
+  }
+
+  Future<void> _refreshAfterScan(bool Function() isCurrent) async {
+    // Use the account's persisted scanned height, never the remote node's tip.
+    await _ffi!.refreshTransactionConfirmations();
+    if (!isCurrent()) return;
+    await updateBalance(isCurrent: isCurrent);
+    if (!isCurrent()) return;
+    await updateTransactions(isCurrent: isCurrent);
+  }
+
+  Future<void> _stopSync() async {
+    // Invalidate Dart results immediately, then cancel the native scan too.
+    final stopped = _syncLoop.stop();
+    await _ffi?.stopScan();
+    await stopped;
   }
 
   /// Handle scan events from the scanner stream
-  void _handleScanEvent(ScanEventDto event) {
+  Future<void> _handleScanEvent(ScanEventDto event, bool Function() isCurrent) async {
+    if (!isCurrent()) return;
+    List<DisplayedTransactionDto>? changedTransactions;
     event.when(
       status: (status) {
         status.when(
@@ -244,17 +231,6 @@ abstract class MinotariWalletBase
           progress: (accountId, currentHeight, blocksScanned) {
             printV('Scan progress: height $currentHeight, scanned $blocksScanned blocks');
             final currentHeightInt = currentHeight.toInt();
-
-            // Refresh chain tip height
-            if (_currentNode != null) {
-              getTipInfo(baseUrl: _currentNode!.uri.toString()).then((tipInfo) {
-                if (tipInfo != null) {
-                  _chainTipHeight = tipInfo.bestBlockHeight.toInt();
-                }
-              }).catchError((e) {
-                printV('Error refreshing chain tip: $e');
-              });
-            }
 
             if (_chainTipHeight > 0 && _chainTipHeight >= currentHeightInt) {
               syncStatus = SyncingSyncStatus.fromHeightValues(
@@ -282,23 +258,16 @@ abstract class MinotariWalletBase
       },
       transactionsReady: (dto) {
         printV('Transactions ready: ${dto.transactions.length} transactions');
-        // Update transactions immediately when discovered (fire-and-forget)
-        _processNewTransactions(dto.transactions).catchError((e) {
-          printV('Error processing new transactions: $e');
-        });
+        changedTransactions = dto.transactions;
       },
       transactionsUpdated: (dto) {
         printV('Transactions updated: ${dto.updatedTransactions.length} transactions');
-        // Update existing transactions (fire-and-forget)
-        _processNewTransactions(dto.updatedTransactions).catchError((e) {
-          printV('Error processing updated transactions: $e');
-        });
+        changedTransactions = dto.updatedTransactions;
       },
-      error: (errorMessage) {
-        printV('Scanner error: $errorMessage');
-        syncStatus = FailedSyncStatus();
-      },
+      error: (errorMessage) => throw StateError(errorMessage),
     );
+    final changes = changedTransactions;
+    if (changes != null) await _processNewTransactions(changes, isCurrent);
   }
 
   @override
@@ -472,9 +441,7 @@ abstract class MinotariWalletBase
 
   @override
   Future<void> close({bool shouldCleanup = false}) async {
-    await _scannerSubscription?.cancel();
-    _scannerSubscription = null;
-    await _ffi?.stopScan();
+    await _stopSync();
     await _ffi?.dispose();
   }
 
@@ -565,9 +532,10 @@ abstract class MinotariWalletBase
     return false;
   }
 
-  Future<void> updateBalance() async {
+  Future<void> updateBalance({bool Function()? isCurrent}) async {
     try {
       final balanceData = await _ffi?.getBalance();
+      if (isCurrent != null && !isCurrent()) return;
       if (balanceData != null) {
         balance[CryptoCurrency.xtm] = MinotariBalance(
           available: balanceData['available'] as int,
@@ -577,23 +545,23 @@ abstract class MinotariWalletBase
       }
     } catch (e) {
       printV('Error updating balance: $e');
+      if (isCurrent != null) rethrow;
     }
   }
 
-  Future<void> updateTransactions() async {
+  Future<void> updateTransactions({bool Function()? isCurrent}) async {
+    if (_isTransactionUpdating) return;
+    _isTransactionUpdating = true;
     try {
-      if (_isTransactionUpdating) return;
-
-      _isTransactionUpdating = true;
-
       final transactions = await fetchTransactions();
+      if (isCurrent != null && !isCurrent()) return;
       transactionHistory.transactions.addAll(transactions);
       await transactionHistory.save();
-
-      _isTransactionUpdating = false;
     } catch (e) {
-      _isTransactionUpdating = false;
       printV('Error updating transactions: $e');
+      if (isCurrent != null) rethrow;
+    } finally {
+      _isTransactionUpdating = false;
     }
   }
 
@@ -602,7 +570,7 @@ abstract class MinotariWalletBase
         ? TransactionDirection.incoming
         : TransactionDirection.outgoing;
 
-    final isPending = txDto.status != DisplayedTransactionStatus.confirmed;
+    final isPending = minotariIsPending(txDto.status);
     final date = DateTime.tryParse(txDto.blockchain.timestamp) ?? DateTime.now();
     final fee = txDto.fee?.amount.toInt();
 
@@ -621,6 +589,7 @@ abstract class MinotariWalletBase
 
     txInfo.additionalInfo['source'] = txDto.source.name;
     txInfo.additionalInfo['status'] = txDto.status.name;
+    txInfo.additionalInfo['historyStatus'] = minotariHistoryStatus(txDto.status);
     txInfo.additionalInfo['amountDisplay'] = txDto.amountDisplay;
 
     if (txDto.message != null && txDto.message!.isNotEmpty) {
@@ -640,16 +609,14 @@ abstract class MinotariWalletBase
   }
 
   /// Process new transactions from the FFI layer (used by stream event handlers)
-  Future<void> _processNewTransactions(List<dynamic> transactions) async {
-    for (final txDynamic in transactions) {
-      try {
-        final txDto = txDynamic as DisplayedTransactionDto;
-        transactionHistory.transactions[txDto.id] = _dtoToTransactionInfo(txDto);
-      } catch (e) {
-        printV('Error processing transaction: $e');
-      }
+  Future<void> _processNewTransactions(
+    List<DisplayedTransactionDto> transactions,
+    bool Function() isCurrent,
+  ) async {
+    if (!isCurrent()) return;
+    for (final txDto in transactions) {
+      transactionHistory.transactions[txDto.id] = _dtoToTransactionInfo(txDto);
     }
-
     await transactionHistory.save();
   }
 }

@@ -228,6 +228,12 @@ class MinotariFfi {
     await scanner.stopScan();
   }
 
+  /// Persist confirmation/status changes using this wallet's scanned height.
+  Future<void> refreshTransactionConfirmations() async {
+    _ensureWalletInitialized();
+    await transactions.refreshTransactionConfirmations(walletName: walletName);
+  }
+
   /// Get transaction history from the wallet
   Future<List<transactions.DisplayedTransactionDto>> getTransactions({
     int limit = 100,
