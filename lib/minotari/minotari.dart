@@ -1,4 +1,6 @@
 import 'package:cake_wallet/view_model/send/output.dart';
+import 'package:cw_core/amount/money.dart';
+import 'package:cw_core/crypto_currency.dart';
 import 'package:cw_core/output_info.dart';
 import 'package:cw_core/transaction_priority.dart';
 import 'package:cw_core/wallet_credentials.dart';
@@ -43,7 +45,7 @@ abstract class Minotari {
     WalletInfo? walletInfo,
   });
 
-  double? getMinotariEstimatedFee(Object wallet);
+  Money? getMinotariEstimatedFee(Object wallet);
 
   List<TransactionPriority> getTransactionPriorities();
   TransactionPriority deserializeMinotariTransactionPriority({required int raw});

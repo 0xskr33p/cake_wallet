@@ -1842,6 +1842,8 @@ Future<void> generateMinotari(bool hasImplementation) async {
   final outputFile = File(minotariOutputPath);
   const minotariCommonHeaders = """
 import 'package:cake_wallet/view_model/send/output.dart';
+import 'package:cw_core/amount/money.dart';
+import 'package:cw_core/crypto_currency.dart';
 import 'package:cw_core/output_info.dart';
 import 'package:cw_core/transaction_priority.dart';
 import 'package:cw_core/wallet_credentials.dart';
@@ -1877,7 +1879,17 @@ abstract class Minotari {
     WalletInfo? walletInfo,
   });
 
-  double? getMinotariEstimatedFee(Object wallet);
+  WalletCredentials createMinotariRestoreWalletFromKeysCredentials({
+    required String name,
+    required String password,
+    required String viewPrivateKeyHex,
+    required String spendPublicKeyHex,
+    required int birthday,
+    String? passphrase,
+    WalletInfo? walletInfo,
+  });
+
+  Money? getMinotariEstimatedFee(Object wallet);
 
   List<TransactionPriority> getTransactionPriorities();
   TransactionPriority deserializeMinotariTransactionPriority({required int raw});
@@ -1904,12 +1916,12 @@ abstract class Minotari {
   const minotariEmptyDefinition = 'Minotari? minotari;\n';
   const minotariCWDefinition = 'Minotari? minotari = CWMinotari();\n';
 
-  final output = '$minotariCommonHeaders\n' +
+  final output = minotariCommonHeaders +
       (hasImplementation ? '$minotariCWHeaders\n' : '\n') +
       (hasImplementation ? '$minotariCwPart\n\n' : '\n') +
       (hasImplementation ? minotariCWDefinition : minotariEmptyDefinition) +
       '\n' +
-      minotariContent;
+      '${minotariContent.trimRight()}\n';
 
   if (outputFile.existsSync()) {
     await outputFile.delete();

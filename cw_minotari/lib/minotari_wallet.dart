@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:cw_core/amount/money.dart';
 import 'package:cw_core/crypto_currency.dart';
 import 'package:cw_core/encryption_file_utils.dart';
 import 'package:cw_core/node.dart';
@@ -332,19 +333,17 @@ abstract class MinotariWalletBase
         ? output.extractedAddress ?? output.address
         : output.address;
 
-    // Calculate amount - handle sendAll and nullable formattedCryptoAmount
-    final int amount;
+    final Money amount;
     if (output.sendAll) {
-      amount = balance[CryptoCurrency.xtm]?.available ?? 0;
+      amount = balance[CryptoCurrency.xtm]?.available ?? Money.zero(CryptoCurrency.xtm);
     } else {
-      final formattedAmount = output.formattedCryptoAmount;
-      if (formattedAmount == null || formattedAmount <= 0) {
-        throw Exception('Invalid amount specified.');
+      if (output.cryptoAmount.currency != CryptoCurrency.xtm) {
+        throw ArgumentError('Minotari transactions require an XTM amount.');
       }
-      amount = formattedAmount;
+      amount = output.cryptoAmount;
     }
 
-    if (amount <= 0) {
+    if (amount.sign <= 0) {
       throw Exception('Invalid amount: $amount');
     }
 
@@ -362,7 +361,7 @@ abstract class MinotariWalletBase
 
     // Use the cached fee estimate, or 0 if not available
     // The actual fee will be calculated by the Rust layer during transaction construction
-    final fee = _cachedFeeEstimate?.estimatedFee.toInt() ?? 0;
+    final fee = Money(_cachedFeeEstimate?.estimatedFee ?? BigInt.zero, CryptoCurrency.xtm);
 
     // Get note/payment ID if provided
     final note = output.note;
@@ -376,7 +375,7 @@ abstract class MinotariWalletBase
         seedWords: seedWords,
         passphrase: passphrase ?? '',
         recipientAddress: recipientAddress,
-        amount: BigInt.from(amount),
+        amount: amount.amount,
         baseNodeUrl: nodeUrl,
         paymentId: paymentId,
       );

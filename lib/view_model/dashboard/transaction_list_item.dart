@@ -249,7 +249,7 @@ class TransactionListItem extends ActionListItem with Keyable {
         break;
       case WalletType.minotari:
         amount = calculateFiatAmountRaw(
-            cryptoAmount: minotari!.formatterMinotariAmountToDouble(amount: transaction.amount),
+            cryptoAmount: double.parse(transaction.amount.toString()),
             price: price);
         break;
 
