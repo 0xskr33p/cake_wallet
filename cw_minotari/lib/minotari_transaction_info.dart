@@ -20,9 +20,9 @@ class MinotariTransactionInfo extends TransactionInfo {
   }) {
     final payrefsList = payrefs ?? [];
     this.id = id;
-    // Retain the generic metadata representation; explorer links use the
-    // explicit block height and references in additionalInfo below.
-    this.txHash = payrefsList.isNotEmpty ? payrefsList.first : 'null';
+    // Cake matches history rows by txHash. The wallet-local ID stays stable
+    // from pending to mined; PayRefs belong only to the payment/explorer data.
+    txHash = id;
     this.amount = Money.fromInt(amount, CryptoCurrency.xtm);
     this.date = date;
     this.direction = direction;
