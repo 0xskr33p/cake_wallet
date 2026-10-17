@@ -23,7 +23,7 @@ import 'package:cw_minotari/minotari_transaction_info.dart';
 import 'package:cw_minotari/minotari_transaction_priority.dart';
 import 'package:cw_minotari/minotari_wallet_addresses.dart';
 import 'package:cw_minotari/pending_minotari_transaction.dart';
-import 'package:cw_minotari/src/rust/api/base_node.dart';
+import 'package:cw_minotari/src/rust/api/base_node.dart' as base_node;
 import 'package:cw_minotari/src/rust/api/network.dart';
 import 'package:cw_minotari/src/rust/api/scanner.dart';
 import 'package:cw_minotari/src/rust/api/transactions.dart';
@@ -197,7 +197,7 @@ abstract class MinotariWalletBase
     syncStatus = AttemptingSyncStatus();
     final nodeUrl = _currentNode!.uri.toString();
     try {
-      final tipInfo = await getTipInfo(baseUrl: nodeUrl);
+      final tipInfo = await base_node.getTipInfo(baseUrl: nodeUrl);
       if (!isCurrent()) return const Stream<ScanEventDto>.empty();
       if (tipInfo != null) _chainTipHeight = tipInfo.bestBlockHeight.toInt();
     } catch (e) {
@@ -592,8 +592,20 @@ abstract class MinotariWalletBase
 
   @override
   Future<bool> checkNodeHealth() async {
-    // TODO Stub implementation - always return true
-    return true;
+    final node = _currentNode;
+    if (node == null) return false;
+
+    try {
+      final uri = node.uri;
+      if (uri.host.isEmpty) return false;
+      // Probe the selected RPC endpoint, not the locally stored wallet balance.
+      // Native health checks use a short timeout and do not require a synced node.
+      return await base_node.checkNodeHealth(baseUrl: uri.toString());
+    } catch (e) {
+      // URI/bridge failures must also reach Cake's health checker as a failed probe.
+      printV('Minotari node health check failed: $e');
+      return false;
+    }
   }
 
   @override
