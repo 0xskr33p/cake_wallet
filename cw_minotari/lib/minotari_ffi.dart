@@ -1,6 +1,13 @@
 import 'package:cw_core/utils/print_verbose.dart';
 import 'package:cw_minotari/src/rust/api/wallet.dart'
-    show WalletCreationDetails, createWallet, restoreWallet, importViewOnlyWallet, renameWallet;
+    show
+        WalletCreationDetails,
+        createWallet,
+        restoreWallet,
+        importViewOnlyWallet,
+        renameWallet,
+        listWallets,
+        deleteWallet;
 import 'package:cw_minotari/src/rust/api/balance.dart' as balance;
 import 'package:cw_minotari/src/rust/api/address.dart' as address;
 import 'package:cw_minotari/src/rust/api/db.dart';
@@ -26,7 +33,6 @@ class MinotariFfi {
   TariNetwork? _networkInternal;
   bool _isInitialized = false;
 
-  static bool _rustLibInitialized = false;
   static bool _dbInitialized = false;
 
   MinotariFfi({required this.dataPath, required this.walletName});
@@ -40,9 +46,10 @@ class MinotariFfi {
   }
 
   static Future<void> _ensureRustLibInitialized() async {
-    if (!_rustLibInitialized) {
+    // Use the bridge's state, including when the app/test initialized it first.
+    // ignore: invalid_use_of_internal_member
+    if (!RustLib.instance.initialized) {
       await RustLib.init();
-      _rustLibInitialized = true;
     }
   }
 
@@ -167,6 +174,17 @@ class MinotariFfi {
 
     printV("[MinotariFfi] Renaming wallet from \"$walletName\" to \"$newWalletName\"");
     await renameWallet(currentWalletName: walletName, newWalletName: newWalletName);
+  }
+
+  /// Remove only this account from the shared database, without opening it or
+  /// stopping another wallet's scanner. Missing accounts allow cleanup to resume
+  /// after native deletion succeeded but file/metadata deletion failed.
+  Future<void> remove() async {
+    await _ensureRustLibInitialized();
+    await _ensureDbInitialized(path: dataPath);
+    if ((await listWallets()).contains(walletName)) {
+      await deleteWallet(walletName: walletName);
+    }
   }
 
   /// Get wallet address

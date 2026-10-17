@@ -484,7 +484,7 @@ abstract class MinotariWalletBase
     // Save the keys file (mnemonic and passphrase)
     if (!(await WalletKeysFile.hasKeysFile(walletInfo.name, walletInfo.type))) {
       await saveKeysFile(password, encryptionFileUtils);
-      saveKeysFile(password, encryptionFileUtils, true); // backup
+      await saveKeysFile(password, encryptionFileUtils, true); // backup
     }
   }
 
