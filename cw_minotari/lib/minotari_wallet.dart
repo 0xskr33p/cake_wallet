@@ -63,12 +63,16 @@ abstract class MinotariWalletBase
 
   MinotariFfi? _ffi;
   bool _isTransactionUpdating;
+  bool _historyNeedsReload = true;
+  int _historyGeneration = 0;
+  final _historyUpdates = MinotariHistoryUpdateQueue();
   late final _syncLoop = MinotariSyncLoop<ScanEventDto>(
     scan: _openScan,
     onEvent: _handleScanEvent,
     refresh: _refreshAfterScan,
     onSynced: () => syncStatus = SyncedSyncStatus(),
     onError: (error, stack) {
+      _historyNeedsReload = true;
       printV('Minotari sync cycle failed: $error');
       syncStatus = FailedSyncStatus();
     },
@@ -111,11 +115,11 @@ abstract class MinotariWalletBase
 
   @override
   WalletKeysData get walletKeysData => WalletKeysData(
-    mnemonic: _mnemonic,
-    passphrase: passphrase,
-    scanSecret: viewPrivateKeyHex,
-    spendPubkey: spendPublicKeyHex,
-  );
+        mnemonic: _mnemonic,
+        passphrase: passphrase,
+        scanSecret: viewPrivateKeyHex,
+        spendPubkey: spendPublicKeyHex,
+      );
 
   @override
   Object get keys => {};
@@ -128,10 +132,10 @@ abstract class MinotariWalletBase
       _ffi = MinotariFfi(dataPath: dbPath, walletName: walletInfo.name);
 
       // Get the network from wallet info (defaults to mainnet if not set)
-     final network = TariNetwork.values.firstWhere(
-       (n) => n.name == walletInfo.network,
-       orElse: () => TariNetwork.mainNet,
-     );
+      final network = TariNetwork.values.firstWhere(
+        (n) => n.name == walletInfo.network,
+        orElse: () => TariNetwork.mainNet,
+      );
 
       // Open the existing wallet database with the correct network
       await _ffi?.open(network);
@@ -177,6 +181,8 @@ abstract class MinotariWalletBase
       syncStatus = FailedSyncStatus();
       return;
     }
+    // Restarting cancels any prior stream, whose final IDs may not be delivered.
+    _historyNeedsReload = true;
     await _syncLoop.start();
   }
 
@@ -201,15 +207,51 @@ abstract class MinotariWalletBase
   }
 
   Future<void> _refreshAfterScan(bool Function() isCurrent) async {
-    // Use the account's persisted scanned height, never the remote node's tip.
-    await _ffi!.refreshTransactionConfirmations();
+    // PR #149 runs the upstream monitor before the scan completes. Consume its
+    // changes; do not recalculate confirmations independently in Cake Wallet.
+    await _updateHistoryChanges(isCurrent);
+    if (isCurrent()) await updateBalance(isCurrent: isCurrent);
+  }
+
+  Future<void> _runHistoryUpdate(
+    bool Function() isCurrent,
+    Future<void> Function() update,
+  ) =>
+      _historyUpdates.run(() async {
+        if (!isCurrent()) return;
+        try {
+          await update();
+          // Native deltas may already be acknowledged when a sync generation
+          // changes. Recover with a snapshot rather than lose those updates.
+          if (!isCurrent()) _historyNeedsReload = true;
+        } catch (_) {
+          // If transport/mapping fails after a native acknowledgement, reconcile
+          // once on recovery. Never replace a successful snapshot with partial data.
+          _historyNeedsReload = true;
+          rethrow;
+        }
+      });
+
+  Future<void> _updateHistoryChanges(bool Function() isCurrent, {List<String>? transactionIds}) =>
+      _runHistoryUpdate(
+          isCurrent, () => _loadHistoryChanges(isCurrent, transactionIds: transactionIds));
+
+  Future<void> _loadHistoryChanges(bool Function() isCurrent,
+      {List<String>? transactionIds}) async {
+    if (_historyNeedsReload) {
+      await _loadTransactions(isCurrent: isCurrent);
+      return;
+    }
+    final changed = await _ffi!.getChangedTransactions(transactionIds: transactionIds);
     if (!isCurrent()) return;
-    await updateBalance(isCurrent: isCurrent);
-    if (!isCurrent()) return;
-    await updateTransactions(isCurrent: isCurrent);
+    printV('Minotari history changes: ${changed.length} transactions');
+    await transactionHistory.applyChanges(changed, _dtoToTransactionInfo, isCurrent: isCurrent);
   }
 
   Future<void> _stopSync() async {
+    // A cancelled native forwarder may not have delivered its last committed
+    // events. Reconcile once when this wallet reconnects, never on idle cycles.
+    _historyNeedsReload = true;
     // Invalidate Dart results immediately, then cancel the native scan too.
     final stopped = _syncLoop.stop();
     await _ffi?.stopScan();
@@ -266,8 +308,12 @@ abstract class MinotariWalletBase
       },
       error: (errorMessage) => throw StateError(errorMessage),
     );
-    final changes = changedTransactions;
-    if (changes != null) await _processNewTransactions(changes, isCurrent);
+    if (changedTransactions != null && changedTransactions!.isNotEmpty) {
+      // Event payloads can contain upstream's raw outgoing amount/fee. Fetch only
+      // dirty IDs through the same canonical mapper as the opening snapshot.
+      await _updateHistoryChanges(isCurrent,
+          transactionIds: changedTransactions!.map((tx) => tx.id).toList());
+    }
   }
 
   @override
@@ -298,9 +344,8 @@ abstract class MinotariWalletBase
     }
 
     final output = creds.outputs.first;
-    final recipientAddress = output.isParsedAddress
-        ? output.extractedAddress ?? output.address
-        : output.address;
+    final recipientAddress =
+        output.isParsedAddress ? output.extractedAddress ?? output.address : output.address;
 
     final Money amount;
     if (output.sendAll) {
@@ -338,6 +383,8 @@ abstract class MinotariWalletBase
 
     // Create the send transaction callback
     Future<String> sendTransactionCallback() async {
+      final historyGeneration = _historyGeneration;
+      bool isCurrent() => historyGeneration == _historyGeneration;
       final completer = Completer<String>();
 
       final stream = ffi.sendTransaction(
@@ -378,9 +425,15 @@ abstract class MinotariWalletBase
       // Wait for transaction to complete
       final txId = await completer.future;
 
-      // Update balance and transactions after send
-      await updateBalance();
-      await updateTransactions();
+      // The send is already recorded. A refresh failure must never invite a
+      // second payment; the next scan recovers history with a full snapshot.
+      try {
+        if (isCurrent()) await updateBalance(isCurrent: isCurrent);
+        if (isCurrent()) await _updateHistoryChanges(isCurrent);
+      } catch (error) {
+        _historyNeedsReload = true;
+        printV('Send recorded; local refresh will retry: $error');
+      }
 
       return txId;
     }
@@ -410,7 +463,8 @@ abstract class MinotariWalletBase
 
     final newWalletPath = await pathForWallet(name: newWalletName, type: walletInfo.type);
 
-    printV('renameWalletFiles from \"${walletInfo.name}\" (in ${currentWalletPath} ) to \"$newWalletName\"');
+    printV(
+        'renameWalletFiles from \"${walletInfo.name}\" (in ${currentWalletPath} ) to \"$newWalletName\"');
     final typeDir = await pathForWalletTypeDir(type: walletInfo.type);
     final ffi = MinotariFfi(dataPath: '$typeDir/wallet.db', walletName: walletInfo.name);
     await ffi.rename(newWalletName: newWalletName);
@@ -441,6 +495,7 @@ abstract class MinotariWalletBase
 
   @override
   Future<void> close({bool shouldCleanup = false}) async {
+    _historyGeneration++;
     await _stopSync();
     await _ffi?.dispose();
   }
@@ -461,7 +516,8 @@ abstract class MinotariWalletBase
       final feePriority = _mapPriorityToFeePriority(priority);
       final nodeUrl = _currentNode!.uri.toString();
 
-      printV('[Minotari Fee] Requesting fee estimate: amount=0, priority=${feePriority.name}, nodeUrl=$nodeUrl');
+      printV(
+          '[Minotari Fee] Requesting fee estimate: amount=0, priority=${feePriority.name}, nodeUrl=$nodeUrl');
 
       _cachedFeeEstimate = await _ffi!.estimateFee(
         amount: BigInt.zero, // TODO it's always zero because we don't know the amount here
@@ -509,15 +565,13 @@ abstract class MinotariWalletBase
   }
 
   @override
-  Future<Map<String, MinotariTransactionInfo>> fetchTransactions() async {
-    final txDtos = await _ffi?.getTransactions();
-    if (txDtos == null) return {};
+  Future<Map<String, MinotariTransactionInfo>> fetchTransactions(
+      {bool Function()? isCurrent}) async {
+    final ffi = _ffi;
+    if (ffi == null) return {};
+    final txDtos = await fetchAllMinotariTransactionPages(ffi.getTransactions);
 
-    final result = <String, MinotariTransactionInfo>{};
-    for (final txDto in txDtos) {
-      result[txDto.id] = _dtoToTransactionInfo(txDto);
-    }
-    return result;
+    return mapMinotariTransactions(txDtos, _dtoToTransactionInfo, isCurrent: isCurrent);
   }
 
   @override
@@ -549,16 +603,25 @@ abstract class MinotariWalletBase
     }
   }
 
-  Future<void> updateTransactions({bool Function()? isCurrent}) async {
+  Future<void> updateTransactions({bool Function()? isCurrent}) {
+    final generation = _historyGeneration;
+    final current = isCurrent ?? () => generation == _historyGeneration;
+    return _runHistoryUpdate(current, () => _loadTransactions(isCurrent: current));
+  }
+
+  Future<void> _loadTransactions({bool Function()? isCurrent}) async {
     if (_isTransactionUpdating) return;
     _isTransactionUpdating = true;
     try {
-      final transactions = await fetchTransactions();
+      final transactions = await fetchTransactions(isCurrent: isCurrent);
       if (isCurrent != null && !isCurrent()) return;
-      transactionHistory.transactions.addAll(transactions);
+      transactionHistory.addMany(transactions);
       await transactionHistory.save();
+      _historyNeedsReload = false;
+      printV('Minotari history full load: ${transactions.length} transactions');
     } catch (e) {
       printV('Error updating transactions: $e');
+      _historyNeedsReload = true;
       if (isCurrent != null) rethrow;
     } finally {
       _isTransactionUpdating = false;
@@ -606,17 +669,5 @@ abstract class MinotariWalletBase
     }
 
     return txInfo;
-  }
-
-  /// Process new transactions from the FFI layer (used by stream event handlers)
-  Future<void> _processNewTransactions(
-    List<DisplayedTransactionDto> transactions,
-    bool Function() isCurrent,
-  ) async {
-    if (!isCurrent()) return;
-    for (final txDto in transactions) {
-      transactionHistory.transactions[txDto.id] = _dtoToTransactionInfo(txDto);
-    }
-    await transactionHistory.save();
   }
 }

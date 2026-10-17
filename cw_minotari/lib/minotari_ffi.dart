@@ -14,8 +14,7 @@ import 'package:cw_minotari/src/rust/frb_generated.dart';
 export 'package:cw_minotari/src/rust/api/send_transaction.dart'
     show SendTransactionEvent, TransactionStage;
 
-export 'package:cw_minotari/src/rust/api/fee.dart'
-    show FeeEstimate, FeePriority;
+export 'package:cw_minotari/src/rust/api/fee.dart' show FeeEstimate, FeePriority;
 
 /// FFI interface for Minotari wallet using Flutter Rust Bridge
 /// Note: The Rust library uses "password" parameter name but it actually means
@@ -88,7 +87,8 @@ class MinotariFfi {
 
     await _ensureDbInitialized(path: dataPath);
 
-    final details = await createWallet(walletName: walletName, network: network, passphrase: passphrase);
+    final details =
+        await createWallet(walletName: walletName, network: network, passphrase: passphrase);
 
     _networkInternal = network;
     _isInitialized = true;
@@ -228,10 +228,11 @@ class MinotariFfi {
     await scanner.stopScan();
   }
 
-  /// Persist confirmation/status changes using this wallet's scanned height.
-  Future<void> refreshTransactionConfirmations() async {
+  Future<List<transactions.DisplayedTransactionDto>> getChangedTransactions(
+      {List<String>? transactionIds}) async {
     _ensureWalletInitialized();
-    await transactions.refreshTransactionConfirmations(walletName: walletName);
+    return await transactions.getChangedTransactions(
+        walletName: walletName, transactionIds: transactionIds);
   }
 
   /// Get transaction history from the wallet
