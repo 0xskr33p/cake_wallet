@@ -14,6 +14,7 @@ import 'package:cw_core/wallet_base.dart';
 import 'package:cw_core/wallet_info.dart';
 import 'package:cw_core/wallet_keys_file.dart';
 import 'package:cw_minotari/minotari_balance.dart';
+import 'package:cw_minotari/minotari_balance_updater.dart';
 import 'package:cw_minotari/minotari_ffi.dart';
 import 'package:cw_minotari/minotari_sync_loop.dart';
 import 'package:cw_minotari/minotari_transaction_status.dart';
@@ -66,6 +67,11 @@ abstract class MinotariWalletBase
   bool _historyNeedsReload = true;
   int _historyGeneration = 0;
   final _historyUpdates = MinotariHistoryUpdateQueue();
+  late final _balanceUpdates = MinotariBalanceUpdater(
+    readBalance: _readBalance,
+    currentBalance: () => balance[CryptoCurrency.xtm],
+    publishBalance: (next) => balance[CryptoCurrency.xtm] = next,
+  );
   late final _syncLoop = MinotariSyncLoop<ScanEventDto>(
     scan: _openScan,
     onEvent: _handleScanEvent,
@@ -181,6 +187,7 @@ abstract class MinotariWalletBase
       syncStatus = FailedSyncStatus();
       return;
     }
+    _balanceUpdates.invalidate();
     // Restarting cancels any prior stream, whose final IDs may not be delivered.
     _historyNeedsReload = true;
     await _syncLoop.start();
@@ -197,6 +204,7 @@ abstract class MinotariWalletBase
       printV('Error fetching chain tip: $e');
     }
     if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+    _balanceUpdates.beginScan();
     final stream = _ffi!.startScan(
       baseNodeAddress: nodeUrl,
       passphrase: passphrase ?? '',
@@ -209,8 +217,14 @@ abstract class MinotariWalletBase
   Future<void> _refreshAfterScan(bool Function() isCurrent) async {
     // PR #149 runs the upstream monitor before the scan completes. Consume its
     // changes; do not recalculate confirmations independently in Cake Wallet.
-    await _updateHistoryChanges(isCurrent);
-    if (isCurrent()) await updateBalance(isCurrent: isCurrent);
+    try {
+      await _updateHistoryChanges(isCurrent);
+    } finally {
+      // A history read failure must not leave an independently readable balance stale.
+      if (isCurrent()) {
+        await updateBalance(isCurrent: isCurrent);
+      }
+    }
   }
 
   Future<void> _runHistoryUpdate(
@@ -253,15 +267,18 @@ abstract class MinotariWalletBase
     // events. Reconcile once when this wallet reconnects, never on idle cycles.
     _historyNeedsReload = true;
     // Invalidate Dart results immediately, then cancel the native scan too.
+    _balanceUpdates.invalidate();
     final stopped = _syncLoop.stop();
     await _ffi?.stopScan();
     await stopped;
+    await _balanceUpdates.idle;
   }
 
   /// Handle scan events from the scanner stream
   Future<void> _handleScanEvent(ScanEventDto event, bool Function() isCurrent) async {
     if (!isCurrent()) return;
     List<DisplayedTransactionDto>? changedTransactions;
+    int? committedHeight;
     event.when(
       status: (status) {
         status.when(
@@ -273,6 +290,7 @@ abstract class MinotariWalletBase
           progress: (accountId, currentHeight, blocksScanned) {
             printV('Scan progress: height $currentHeight, scanned $blocksScanned blocks');
             final currentHeightInt = currentHeight.toInt();
+            committedHeight = currentHeightInt;
 
             if (_chainTipHeight > 0 && _chainTipHeight >= currentHeightInt) {
               syncStatus = SyncingSyncStatus.fromHeightValues(
@@ -308,6 +326,20 @@ abstract class MinotariWalletBase
       },
       error: (errorMessage) => throw StateError(errorMessage),
     );
+    if (committedHeight != null) {
+      // Upstream emits Progress after committing the batch. TransactionsReady
+      // may arrive earlier and is not a safe boundary for a balance read.
+      try {
+        final refreshed = await _balanceUpdates.refresh(force: false, isCurrent: isCurrent);
+        if (refreshed) {
+          printV('Minotari balance refreshed during scan at height $committedHeight');
+        }
+      } catch (error) {
+        // Keep the last valid balance and continue the scan; the next permitted
+        // progress or the unconditional final refresh will retry this local read.
+        printV('Minotari intermediate balance refresh will retry: $error');
+      }
+    }
     if (changedTransactions != null && changedTransactions!.isNotEmpty) {
       // Event payloads can contain upstream's raw outgoing amount/fee. Fetch only
       // dirty IDs through the same canonical mapper as the opening snapshot.
@@ -586,17 +618,24 @@ abstract class MinotariWalletBase
     return false;
   }
 
+  Future<MinotariBalance?> _readBalance() async {
+    final data = await _ffi?.getBalance();
+    if (data == null) {
+      return null;
+    }
+    return MinotariBalance(
+      available: data["available"]!,
+      pendingIncoming: data["pendingIncoming"]!,
+      pendingOutgoing: data["pendingOutgoing"]!,
+    );
+  }
+
+  @override
   Future<void> updateBalance({bool Function()? isCurrent}) async {
+    final generation = _historyGeneration;
+    bool current() => generation == _historyGeneration && (isCurrent?.call() ?? true);
     try {
-      final balanceData = await _ffi?.getBalance();
-      if (isCurrent != null && !isCurrent()) return;
-      if (balanceData != null) {
-        balance[CryptoCurrency.xtm] = MinotariBalance(
-          available: balanceData['available'] as int,
-          pendingIncoming: balanceData['pendingIncoming'] as int,
-          pendingOutgoing: balanceData['pendingOutgoing'] as int,
-        );
-      }
+      await _balanceUpdates.refresh(isCurrent: current);
     } catch (e) {
       printV('Error updating balance: $e');
       if (isCurrent != null) rethrow;
