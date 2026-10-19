@@ -274,7 +274,7 @@ class CommonTestFlows {
   Future<void> _confirmWalletDetails() async {
     await _walletSeedPageRobot.isWalletSeedPage();
 
-    _walletSeedPageRobot.confirmWalletDetailsDisplayCorrectly();
+    await _walletSeedPageRobot.confirmWalletDetailsDisplayCorrectly();
 
     _walletSeedPageRobot.confirmWalletSeedReminderDisplays();
 
