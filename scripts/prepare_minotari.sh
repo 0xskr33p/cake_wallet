@@ -43,7 +43,7 @@ CW_PARENT_DIR="$PROJECT_ROOT/cw_minotari"
 CW_RUST_DIR="$CW_PARENT_DIR/rust"
 CW_REPO_URL="https://github.com/0xskr33p/cw_tari_wallet.git"
 # Update this pin after pushing the corresponding wrapper changes.
-CW_REPO_REV="484324cb3903b3120bff3af25ec2443c0bee4ce6"
+CW_REPO_REV="45394e994165b103521431cec4b27dc9f3ee6370"
 
 
 #######################################

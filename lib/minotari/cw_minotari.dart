@@ -68,39 +68,59 @@ class CWMinotari extends Minotari {
   }
 
   @override
-  List<TransactionPriority> getTransactionPriorities() =>
-      MinotariTransactionPriority.all;
+  Future<Money> estimateMinotariPaymentFee(
+    Object wallet, {
+    required Money amount,
+    TransactionPriority? priority,
+    String? paymentId,
+  }) async {
+    if (amount.currency != CryptoCurrency.xtm) {
+      throw ArgumentError('Minotari fees require an XTM amount.');
+    }
+    final quote = await (wallet as MinotariWallet).estimatePaymentFee(
+      amount: amount.amount,
+      priority: priority,
+      paymentId: paymentId,
+    );
+    return Money(quote.estimatedFee, CryptoCurrency.xtm);
+  }
+
+  @override
+  List<TransactionPriority> getTransactionPriorities() => MinotariTransactionPriority.all;
 
   @override
   TransactionPriority deserializeMinotariTransactionPriority({required int raw}) =>
       MinotariTransactionPriority.deserialize(raw: raw);
 
   @override
-  TransactionPriority getMinotariTransactionPriorityMedium() =>
-      MinotariTransactionPriority.medium;
+  TransactionPriority getMinotariTransactionPriorityMedium() => MinotariTransactionPriority.medium;
 
   @override
-  TransactionPriority getMinotariTransactionPrioritySlow() =>
-      MinotariTransactionPriority.slow;
+  TransactionPriority getMinotariTransactionPrioritySlow() => MinotariTransactionPriority.slow;
 
   @override
-  Object createMinotariTransactionCredentials(List<Output> outputs) =>
+  Object createMinotariTransactionCredentials(List<Output> outputs,
+          {TransactionPriority? priority}) =>
       MinotariTransactionCredentials(
-        outputs.map((out) => OutputInfo(
-          fiatAmount: out.fiatAmount,
-          cryptoAmount: out.cryptoAmountMoney,
-          address: out.address,
-          note: out.note,
-          sendAll: out.sendAll,
-          extractedAddress: out.extractedAddress,
-          isParsedAddress: out.isParsedAddress,
-          memo: out.memo,
-        )).toList(),
+        outputs
+            .map((out) => OutputInfo(
+                  fiatAmount: out.fiatAmount,
+                  cryptoAmount: out.cryptoAmountMoney,
+                  address: out.address,
+                  note: out.note,
+                  sendAll: out.sendAll,
+                  extractedAddress: out.extractedAddress,
+                  isParsedAddress: out.isParsedAddress,
+                  memo: out.memo,
+                ))
+            .toList(),
+        priority: priority,
       );
 
   @override
-  Object createMinotariTransactionCredentialsRaw(List<OutputInfo> outputs) =>
-      MinotariTransactionCredentials(outputs);
+  Object createMinotariTransactionCredentialsRaw(List<OutputInfo> outputs,
+          {TransactionPriority? priority}) =>
+      MinotariTransactionCredentials(outputs, priority: priority);
 
   @override
   int getHeightByDate({required DateTime date}) {
@@ -153,6 +173,5 @@ class CWMinotari extends Minotari {
       minotariAmountToDouble(amount: amount);
 
   @override
-  int formatterMinotariParseAmount({required String amount}) =>
-      minotariParseAmount(amount: amount);
+  int formatterMinotariParseAmount({required String amount}) => minotariParseAmount(amount: amount);
 }

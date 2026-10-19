@@ -47,14 +47,23 @@ abstract class Minotari {
 
   Money? getMinotariEstimatedFee(Object wallet);
 
+  Future<Money> estimateMinotariPaymentFee(
+    Object wallet, {
+    required Money amount,
+    TransactionPriority? priority,
+    String? paymentId,
+  });
+
   List<TransactionPriority> getTransactionPriorities();
   TransactionPriority deserializeMinotariTransactionPriority({required int raw});
   TransactionPriority getMinotariTransactionPriorityMedium();
   TransactionPriority getMinotariTransactionPrioritySlow();
 
-  Object createMinotariTransactionCredentials(List<Output> outputs);
+  Object createMinotariTransactionCredentials(List<Output> outputs,
+      {TransactionPriority? priority});
 
-  Object createMinotariTransactionCredentialsRaw(List<OutputInfo> outputs);
+  Object createMinotariTransactionCredentialsRaw(List<OutputInfo> outputs,
+      {TransactionPriority? priority});
 
   int getHeightByDate({required DateTime date});
   Future<int> getCurrentHeight();

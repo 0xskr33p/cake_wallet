@@ -283,6 +283,8 @@ class MinotariFfi {
     required BigInt amount,
     required String baseNodeUrl,
     String? paymentId,
+    required BigInt feePerGram,
+    required BigInt maxFee,
   }) {
     _ensureWalletInitialized();
 
@@ -297,7 +299,11 @@ class MinotariFfi {
       paymentId: paymentId,
     );
 
-    return send_tx.sendTransaction(details: details);
+    return send_tx.sendTransactionWithFee(
+      details: details,
+      feePerGram: feePerGram,
+      maxFee: maxFee,
+    );
   }
 
   /// Estimate transaction fee based on amount and priority
@@ -309,14 +315,16 @@ class MinotariFfi {
     required BigInt amount,
     required fee.FeePriority priority,
     required String baseNodeUrl,
+    String? paymentId,
   }) async {
     _ensureWalletInitialized();
 
-    return await fee.estimateTransactionFee(
+    return await fee.estimatePaymentFee(
       amount: amount,
       priority: priority,
       baseUrl: baseNodeUrl,
       walletName: walletName,
+      paymentId: paymentId,
     );
   }
 

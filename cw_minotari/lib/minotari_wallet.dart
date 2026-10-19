@@ -87,8 +87,20 @@ abstract class MinotariWalletBase
   int _chainTipHeight = 0;
   int _initialSyncHeight = 0;
 
-  /// Cached fee estimate from the last updateEstimatedFeesParams call
+  /// Only a completed quote for the latest amount/priority/payment is cached.
   FeeEstimate? _cachedFeeEstimate;
+  BigInt? _cachedFeeAmount;
+  FeePriority? _cachedFeePriority;
+  int _feeRequest = 0;
+  ({BigInt amount, FeePriority priority, String? paymentId, String url})? _activeFeeKey;
+
+  void _invalidateFee() {
+    _feeRequest++;
+    _cachedFeeEstimate = null;
+    _cachedFeeAmount = null;
+    _cachedFeePriority = null;
+    _activeFeeKey = null;
+  }
 
   final String _password;
   final String? _mnemonic;
@@ -164,6 +176,7 @@ abstract class MinotariWalletBase
 
   @override
   Future<void> connectToNode({required Node node}) async {
+    _invalidateFee();
     try {
       await _stopSync();
       syncStatus = ConnectingSyncStatus();
@@ -371,8 +384,8 @@ abstract class MinotariWalletBase
     }
 
     // Get the first output (Minotari doesn't support multiple outputs yet)
-    if (creds.outputs.isEmpty) {
-      throw Exception('No outputs specified for transaction.');
+    if (creds.outputs.length != 1) {
+      throw Exception('Minotari requires exactly one recipient.');
     }
 
     final output = creds.outputs.first;
@@ -381,7 +394,8 @@ abstract class MinotariWalletBase
 
     final Money amount;
     if (output.sendAll) {
-      amount = balance[CryptoCurrency.xtm]?.available ?? Money.zero(CryptoCurrency.xtm);
+      throw UnsupportedError(
+          'Send All is not supported by the current Minotari library: a change output is required.');
     } else {
       if (output.cryptoAmount.currency != CryptoCurrency.xtm) {
         throw ArgumentError('Minotari transactions require an XTM amount.');
@@ -405,16 +419,25 @@ abstract class MinotariWalletBase
 
     final nodeUrl = currentNode.uri.toString();
 
-    // Use the cached fee estimate, or 0 if not available
-    // The actual fee will be calculated by the Rust layer during transaction construction
-    final fee = Money(_cachedFeeEstimate?.estimatedFee ?? BigInt.zero, CryptoCurrency.xtm);
-
     // Get note/payment ID if provided
     final note = output.note;
     final paymentId = (note != null && note.isNotEmpty) ? note : null;
 
+    // Confirmation always uses a fresh quote for this immutable payment. A
+    // failed estimate must prevent confirmation rather than substitute zero.
+    final quote = await estimatePaymentFee(
+      amount: amount.amount,
+      priority: creds.priority,
+      paymentId: paymentId,
+    );
+    final fee = Money(quote.estimatedFee, CryptoCurrency.xtm);
+    final quotedGeneration = _historyGeneration;
+
     // Create the send transaction callback
     Future<String> sendTransactionCallback() async {
+      if (_historyGeneration != quotedGeneration || _currentNode?.uri.toString() != nodeUrl) {
+        throw StateError('Wallet or node changed. Review the payment again.');
+      }
       final historyGeneration = _historyGeneration;
       bool isCurrent() => historyGeneration == _historyGeneration;
       final completer = Completer<String>();
@@ -426,6 +449,8 @@ abstract class MinotariWalletBase
         amount: amount.amount,
         baseNodeUrl: nodeUrl,
         paymentId: paymentId,
+        feePerGram: quote.feePerGram,
+        maxFee: quote.estimatedFee,
       );
 
       stream.listen(
@@ -527,6 +552,7 @@ abstract class MinotariWalletBase
 
   @override
   Future<void> close({bool shouldCleanup = false}) async {
+    _invalidateFee();
     _historyGeneration++;
     await _stopSync();
     await _ffi?.dispose();
@@ -534,41 +560,67 @@ abstract class MinotariWalletBase
 
   @override
   int calculateEstimatedFee(TransactionPriority priority, int? amount) {
+    if (amount == null ||
+        BigInt.from(amount) != _cachedFeeAmount ||
+        _mapPriorityToFeePriority(priority) != _cachedFeePriority) return 0;
     return _cachedFeeEstimate?.estimatedFee.toInt() ?? 0;
   }
 
   @override
   Future<void> updateEstimatedFeesParams(TransactionPriority? priority) async {
-    if (_currentNode == null || _ffi == null) {
-      printV('[Minotari Fee] Cannot estimate fee: no node connected or wallet not initialized');
-      return;
+    // The generic hook has no amount. XTM uses estimatePaymentFee explicitly;
+    // querying for zero here would select inputs for a different transaction.
+  }
+
+  Future<FeeEstimate> estimatePaymentFee({
+    required BigInt amount,
+    TransactionPriority? priority,
+    String? paymentId,
+  }) async {
+    _invalidateFee();
+    if (amount <= BigInt.zero || amount > (BigInt.one << 64) - BigInt.one) {
+      throw ArgumentError('Minotari amount must be a positive uint64 in microTari.');
     }
-
-    try {
-      final feePriority = _mapPriorityToFeePriority(priority);
-      final nodeUrl = _currentNode!.uri.toString();
-
-      printV(
-          '[Minotari Fee] Requesting fee estimate: amount=0, priority=${feePriority.name}, nodeUrl=$nodeUrl');
-
-      _cachedFeeEstimate = await _ffi!.estimateFee(
-        amount: BigInt.zero, // TODO it's always zero because we don't know the amount here
-        priority: feePriority,
-        baseNodeUrl: nodeUrl,
-      );
-
-      if (_cachedFeeEstimate != null) {
-        printV('[Minotari Fee] Fee estimate received: '
-            'estimatedFee=${_cachedFeeEstimate!.estimatedFee}, '
-            'feePerGram=${_cachedFeeEstimate!.feePerGram}, '
-            'inputCount=${_cachedFeeEstimate!.inputCount}, '
-            'totalAmountRequired=${_cachedFeeEstimate!.totalAmountRequired}');
-      } else {
-        printV('[Minotari Fee] Fee estimate returned null');
-      }
-    } catch (e) {
-      printV('[Minotari Fee] Error estimating fee: $e');
+    final ffi = _ffi;
+    final node = _currentNode;
+    if (ffi == null || node == null) {
+      throw StateError('Wallet and node must be initialized to estimate a payment.');
     }
+    final request = _feeRequest;
+    final generation = _historyGeneration;
+    final feePriority = _mapPriorityToFeePriority(priority);
+    final key = (
+      amount: amount,
+      priority: feePriority,
+      paymentId: paymentId?.isEmpty == true ? null : paymentId,
+      url: node.uri.toString(),
+    );
+    _activeFeeKey = key;
+    final quote = await ffi.estimateFee(
+      amount: amount,
+      priority: feePriority,
+      baseNodeUrl: key.url,
+      paymentId: key.paymentId,
+    );
+    if (generation != _historyGeneration ||
+        node != _currentNode ||
+        node.uri.toString() != key.url ||
+        (request != _feeRequest && _activeFeeKey != key)) {
+      throw StateError('The payment changed while estimating its fee.');
+    }
+    if (quote.estimatedFee <= BigInt.zero ||
+        quote.feePerGram <= BigInt.zero ||
+        quote.totalAmountRequired != amount + quote.estimatedFee) {
+      throw StateError('Invalid Minotari fee estimate.');
+    }
+    // An identical preview may overlap confirmation. Return its independent
+    // quote without letting an older completion replace the latest cache.
+    if (request == _feeRequest) {
+      _cachedFeeAmount = amount;
+      _cachedFeePriority = feePriority;
+      _cachedFeeEstimate = quote;
+    }
+    return quote;
   }
 
   /// Map Dart TransactionPriority to Rust FeePriority enum
