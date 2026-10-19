@@ -672,14 +672,41 @@ abstract class MinotariWalletBase
 
   @override
   Future<String> signMessage(String message, {String? address}) async {
-    // TODO Stub implementation
-    throw UnimplementedError('signMessage not yet implemented');
+    final mnemonic = _mnemonic;
+    if (mnemonic == null || mnemonic.trim().isEmpty) {
+      throw StateError('A view-only wallet cannot sign messages.');
+    }
+
+    final signingAddress = address?.trim();
+    if (signingAddress != null &&
+        signingAddress.isNotEmpty &&
+        signingAddress != walletAddresses.address) {
+      throw ArgumentError('Minotari can only sign messages with this wallet\'s address.');
+    }
+
+    final seedWords = mnemonic.trim().split(RegExp(r'\s+'));
+    if (seedWords.length != 24) {
+      throw StateError('Invalid seed: expected 24 words, got ${seedWords.length}');
+    }
+
+    // The native adapter derives the same spend key as wallet creation/send.
+    // A Tari passphrase encrypts the account at rest; it is not a signing input.
+    return MinotariFfi.signMessage(message, seedWords: seedWords);
   }
 
   @override
   Future<bool> verifyMessage(String message, String signature, {String? address}) async {
-    // TODO Stub implementation
-    return false;
+    final verifyingAddress = address?.trim();
+    if (verifyingAddress == null || verifyingAddress.isEmpty || signature.trim().isEmpty) {
+      return false;
+    }
+
+    try {
+      return await MinotariFfi.verifyMessage(message, signature.trim(), address: verifyingAddress);
+    } catch (_) {
+      // Match Cake's boolean verification contract for malformed addresses/signatures.
+      return false;
+    }
   }
 
   Future<MinotariBalance?> _readBalance() async {

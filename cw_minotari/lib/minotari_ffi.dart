@@ -16,6 +16,7 @@ import 'package:cw_minotari/src/rust/api/scanner.dart' as scanner;
 import 'package:cw_minotari/src/rust/api/transactions.dart' as transactions;
 import 'package:cw_minotari/src/rust/api/send_transaction.dart' as send_tx;
 import 'package:cw_minotari/src/rust/api/network.dart';
+import 'package:cw_minotari/src/rust/api/signing.dart' as signing;
 import 'package:cw_minotari/src/rust/frb_generated.dart';
 
 export 'package:cw_minotari/src/rust/api/send_transaction.dart'
@@ -51,6 +52,22 @@ class MinotariFfi {
     if (!RustLib.instance.initialized) {
       await RustLib.init();
     }
+  }
+
+  /// Off-chain signing needs only the seed; it never opens the shared database.
+  static Future<String> signMessage(String message, {required List<String> seedWords}) async {
+    await _ensureRustLibInitialized();
+    return signing.signMessage(message: message, seedWords: seedWords);
+  }
+
+  /// Verification is also available without an open or spend-capable wallet.
+  static Future<bool> verifyMessage(
+    String message,
+    String signature, {
+    required String address,
+  }) async {
+    await _ensureRustLibInitialized();
+    return signing.verifyMessage(message: message, signature: signature, address: address);
   }
 
   /// Initializes the shared database once for all Minotari wallets.
