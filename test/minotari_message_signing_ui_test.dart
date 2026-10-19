@@ -13,8 +13,10 @@ import 'package:cw_core/encryption_file_utils.dart';
 import 'package:cw_core/wallet_info.dart';
 import 'package:cw_core/wallet_type.dart';
 import 'package:cw_minotari/minotari_wallet.dart';
+import 'package:cw_minotari/src/rust/api/logger.dart';
 import 'package:cw_minotari/src/rust/frb_generated.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _Info extends Fake implements WalletInfo {
@@ -39,6 +41,9 @@ class _Api extends Fake implements RustLibApi {
   Completer<String>? signing;
   bool valid = true;
   @override
+  void crateApiLoggerInitLogger({required String basePath, LoggerConfig? config}) {}
+
+  @override
   Future<String> crateApiSigningSignMessage(
       {required String message, required List<String> seedWords}) {
     signingCalls++;
@@ -57,10 +62,19 @@ class _Api extends Fake implements RustLibApi {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   final api = _Api();
+  const paths = MethodChannel('plugins.flutter.io/path_provider');
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   late SignViewModel vm;
-  setUpAll(() => RustLib.initMock(api: api));
-  tearDownAll(RustLib.dispose);
+  setUpAll(() {
+    RustLib.initMock(api: api);
+    messenger.setMockMethodCallHandler(paths, (_) async => '/synthetic/application-support');
+  });
+  tearDownAll(() {
+    messenger.setMockMethodCallHandler(paths, null);
+    RustLib.dispose();
+  });
   setUp(() {
     api.signedMessage = null;
     api.verifiedMessage = null;

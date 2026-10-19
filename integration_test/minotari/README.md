@@ -19,6 +19,19 @@ The controlled credit tests native-to-UI balance display. It does not prove live
 scanning or receipt of a chain transaction. These cases do not send funds.
 The fixture seed is intentionally public and must never hold funds.
 
+The separate `minotari_logging_test.dart` checks that XTM startup creates the
+native log in application support, records database initialization after logger
+startup, and reuses the logger for another wallet handle. It creates only a
+temporary database, with no accounts, seeds, funds or network requests.
+
+Production XTM logging starts on first use of `MinotariFfi`, after the bridge is
+ready and before database/account operations. The existing native defaults write
+Info logs to stdout and `<application-support>/logs/minotari.log`, with 10 MiB
+rotation and five archives. Setup is attempted once per Dart session; a failure
+emits one generic warning and lets wallet operations continue. Closing a wallet
+does not reset the native process logger. No debug levels or PII reveal flag are
+enabled by this integration.
+
 The suite reuses `CommonTestFlows` and the existing page robots. Its small XTM
 subclass confirms PIN setup using the actual localized OK button: the existing
 shared helper expects an alert button key that the current alert widget does not
@@ -50,6 +63,17 @@ accept an existing Simulator/device ID. It passes `--keep-app-running` because
 Flutter drive's default teardown **uninstalls the app and deletes its container**;
 path/preferences isolation inside Dart does not protect against that uninstall.
 Do not run the target against a device containing personal wallets.
+It builds the selected target as a separate checked step before driving that
+binary: Flutter drive can otherwise retry a failed build using a stale bundle.
+
+To check native logging with the ordinary mainnet framework (no Esmeralda build
+needed), select the `logging` suite:
+
+```sh
+bash scripts/ios/test_minotari.sh <device-type-id> <ios-runtime-id> logging
+```
+
+The default `wallet` suite and its Esmeralda requirement are unchanged.
 
 The opt-in flag and separate directory keep this target out of the runner's
 default multi-currency/mainnet suite. On Android, use an Android Esmeralda native

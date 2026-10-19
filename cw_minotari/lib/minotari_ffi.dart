@@ -1,4 +1,5 @@
 import 'package:cw_core/utils/print_verbose.dart';
+import 'package:cw_minotari/minotari_native_logger.dart';
 import 'package:cw_minotari/src/rust/api/wallet.dart'
     show
         WalletCreationDetails,
@@ -35,6 +36,8 @@ class MinotariFfi {
   bool _isInitialized = false;
 
   static bool _dbInitialized = false;
+  static Future<void>? _rustLibInitialization;
+  static final _nativeLogger = MinotariNativeLogger();
 
   MinotariFfi({required this.dataPath, required this.walletName});
 
@@ -50,8 +53,16 @@ class MinotariFfi {
     // Use the bridge's state, including when the app/test initialized it first.
     // ignore: invalid_use_of_internal_member
     if (!RustLib.instance.initialized) {
-      await RustLib.init();
+      final initialization = _rustLibInitialization ??= RustLib.init();
+      try {
+        await initialization;
+      } finally {
+        if (identical(_rustLibInitialization, initialization)) {
+          _rustLibInitialization = null;
+        }
+      }
     }
+    await _nativeLogger.ensureInitialized();
   }
 
   /// Off-chain signing needs only the seed; it never opens the shared database.
