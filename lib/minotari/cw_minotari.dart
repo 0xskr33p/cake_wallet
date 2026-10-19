@@ -2,6 +2,12 @@ part of 'minotari.dart';
 
 class CWMinotari extends Minotari {
   @override
+  Future<bool> beginBackgroundSync() => MinotariRuntime.instance.beginBackground();
+
+  @override
+  Future<void> endBackgroundSync() => MinotariRuntime.instance.endBackground();
+
+  @override
   WalletService createMinotariWalletService() => MinotariWalletService();
 
   @override

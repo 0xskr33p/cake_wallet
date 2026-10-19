@@ -17,6 +17,7 @@ import 'package:cw_minotari/minotari_balance.dart';
 import 'package:cw_minotari/minotari_balance_updater.dart';
 import 'package:cw_minotari/minotari_ffi.dart';
 import 'package:cw_minotari/minotari_sync_loop.dart';
+import 'package:cw_minotari/minotari_runtime.dart';
 import 'package:cw_minotari/minotari_transaction_status.dart';
 import 'package:cw_minotari/minotari_transaction_history.dart';
 import 'package:cw_minotari/minotari_transaction_info.dart';
@@ -146,6 +147,7 @@ abstract class MinotariWalletBase
 
   Future<void> init() async {
     try {
+      await MinotariRuntime.instance.attach(this, pause: _stopSync, resume: _resumeSync);
       final dbPath = '${await pathForWalletTypeDir(type: walletInfo.type)}/wallet.db';
       _ffi = MinotariFfi(dataPath: dbPath, walletName: walletInfo.name);
 
@@ -169,9 +171,19 @@ abstract class MinotariWalletBase
       await updateBalance();
       await updateTransactions();
     } catch (e) {
+      MinotariRuntime.instance.detach(this);
       printV('Error initializing Minotari wallet: $e');
       rethrow;
     }
+  }
+
+  Future<void> _resumeSync() async {
+    if (_ffi == null) return;
+    await _ffi!.resume();
+    _historyNeedsReload = true;
+    await updateTransactions();
+    await updateBalance();
+    if (_currentNode != null) await startSync();
   }
 
   @override
@@ -206,25 +218,76 @@ abstract class MinotariWalletBase
     await _syncLoop.start();
   }
 
-  Future<Stream<ScanEventDto>> _openScan(bool Function() isCurrent) async {
-    syncStatus = AttemptingSyncStatus();
-    final nodeUrl = _currentNode!.uri.toString();
-    try {
-      final tipInfo = await base_node.getTipInfo(baseUrl: nodeUrl);
-      if (!isCurrent()) return const Stream<ScanEventDto>.empty();
-      if (tipInfo != null) _chainTipHeight = tipInfo.bestBlockHeight.toInt();
-    } catch (e) {
-      printV('Error fetching chain tip: $e');
+  @override
+  Future<void> startBackgroundSync() async {
+    if (_currentNode == null || _ffi == null) {
+      syncStatus = FailedSyncStatus();
+      throw StateError('Minotari background sync needs an open wallet and node');
     }
-    if (!isCurrent()) return const Stream<ScanEventDto>.empty();
-    _balanceUpdates.beginScan();
-    final stream = _ffi!.startScan(
-      baseNodeAddress: nodeUrl,
-      passphrase: passphrase ?? '',
-      continuous: false,
-    );
-    syncStatus = SyncronizingSyncStatus();
-    return stream;
+    _balanceUpdates.invalidate();
+    _historyNeedsReload = true;
+    final cancelled = Completer<void>();
+    final cancellation = Timer.periodic(const Duration(milliseconds: 250), (_) {
+      if (MinotariRuntime.instance.backgroundCancelled && !cancelled.isCompleted) {
+        cancelled.completeError(StateError('Minotari foreground requested'));
+      }
+    });
+    try {
+      await Future.any([_syncLoop.runOnce(), cancelled.future]).timeout(const Duration(minutes: 3));
+      if (syncStatus is! SyncedSyncStatus || !_scanCompleted) {
+        throw StateError('Minotari background scan did not complete');
+      }
+    } catch (_) {
+      syncStatus = FailedSyncStatus();
+      rethrow;
+    } finally {
+      cancellation.cancel();
+      await _stopSync();
+    }
+  }
+
+  @override
+  Future<void> stopSync() => _stopSync();
+
+  bool _scanCompleted = false;
+  Completer<void>? _openingCancelled;
+
+  Future<Stream<ScanEventDto>> _openScan(bool Function() isCurrent) async {
+    _scanCompleted = false;
+    final cancelled = Completer<void>();
+    _openingCancelled = cancelled;
+    try {
+      await MinotariRuntime.instance.ensureSession();
+      if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+      await _ffi!.resume();
+      if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+      syncStatus = AttemptingSyncStatus();
+      final nodeUrl = _currentNode!.uri.toString();
+      try {
+        // Tip RPC is stateless: cancelling its wait must not delay native handover.
+        // Future.any observes late failures too; isCurrent rejects late responses.
+        final tipInfo = await Future.any([
+          base_node.getTipInfo(baseUrl: nodeUrl),
+          cancelled.future.then<base_node.TipInfo?>((_) => null),
+        ]);
+        if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+        if (tipInfo != null) _chainTipHeight = tipInfo.bestBlockHeight.toInt();
+      } catch (e) {
+        if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+        printV('Error fetching chain tip: $e');
+      }
+      if (!isCurrent()) return const Stream<ScanEventDto>.empty();
+      _balanceUpdates.beginScan();
+      final stream = _ffi!.startScan(
+        baseNodeAddress: nodeUrl,
+        passphrase: passphrase ?? '',
+        continuous: false,
+      );
+      syncStatus = SyncronizingSyncStatus();
+      return stream;
+    } finally {
+      if (identical(_openingCancelled, cancelled)) _openingCancelled = null;
+    }
   }
 
   Future<void> _refreshAfterScan(bool Function() isCurrent) async {
@@ -281,10 +344,13 @@ abstract class MinotariWalletBase
     _historyNeedsReload = true;
     // Invalidate Dart results immediately, then cancel the native scan too.
     _balanceUpdates.invalidate();
+    final opening = _openingCancelled;
+    if (opening != null && !opening.isCompleted) opening.complete();
     final stopped = _syncLoop.stop();
     await _ffi?.stopScan();
     await stopped;
     await _balanceUpdates.idle;
+    await _historyUpdates.idle;
   }
 
   /// Handle scan events from the scanner stream
@@ -316,6 +382,7 @@ abstract class MinotariWalletBase
             }
           },
           completed: (accountId, finalHeight, totalBlocksScanned) {
+            _scanCompleted = true;
             printV('Scan completed at height $finalHeight, total blocks: $totalBlocksScanned');
           },
           paused: (accountId, lastScannedHeight, reason) {
@@ -499,7 +566,7 @@ abstract class MinotariWalletBase
       amount: amount,
       fee: fee,
       recipientAddress: recipientAddress,
-      sendTransaction: sendTransactionCallback,
+      sendTransaction: () => MinotariRuntime.instance.run(sendTransactionCallback),
     );
   }
 
@@ -554,8 +621,12 @@ abstract class MinotariWalletBase
   Future<void> close({bool shouldCleanup = false}) async {
     _invalidateFee();
     _historyGeneration++;
-    await _stopSync();
-    await _ffi?.dispose();
+    try {
+      await _stopSync();
+      await _ffi?.dispose();
+    } finally {
+      MinotariRuntime.instance.detach(this);
+    }
   }
 
   @override

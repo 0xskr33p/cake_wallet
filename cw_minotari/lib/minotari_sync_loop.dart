@@ -24,18 +24,24 @@ class MinotariSyncLoop<T> {
   Completer<bool>? _done;
   Future<void> _cycle = Future<void>.value();
 
-  Future<void> start() async {
+  Future<void> start({bool repeat = true}) async {
     final generation = ++_generation;
     await _cancelCycle();
     if (generation != _generation) {
       return;
     }
-    _cycle = _runCycle(generation);
+    _cycle = _runCycle(generation, repeat: repeat);
   }
 
   Future<void> stop() async {
     ++_generation;
     await _cancelCycle();
+  }
+
+  /// A background job waits for the final event and refresh, with no retry timer.
+  Future<void> runOnce() async {
+    await start(repeat: false);
+    await _cycle;
   }
 
   Future<void> _cancelCycle() async {
@@ -52,7 +58,7 @@ class MinotariSyncLoop<T> {
     await running;
   }
 
-  Future<void> _runCycle(int generation) async {
+  Future<void> _runCycle(int generation, {required bool repeat}) async {
     bool isCurrent() => generation == _generation;
     StreamSubscription<T>? subscription;
     final done = Completer<bool>();
@@ -115,10 +121,10 @@ class MinotariSyncLoop<T> {
       if (identical(_done, done)) {
         _done = null;
       }
-      if (isCurrent()) {
+      if (repeat && isCurrent()) {
         _timer = Timer(interval, () {
           _timer = null;
-          _cycle = _runCycle(generation);
+          _cycle = _runCycle(generation, repeat: repeat);
         });
       }
     }

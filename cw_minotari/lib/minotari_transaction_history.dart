@@ -8,6 +8,7 @@ part 'minotari_transaction_history.g.dart';
 /// Serialize snapshots and deltas, without poisoning the queue after a failure.
 class MinotariHistoryUpdateQueue {
   Future<void> _tail = Future<void>.value();
+  Future<void> get idle => _tail;
 
   Future<void> run(Future<void> Function() update) {
     final result = _tail.then((_) => update());

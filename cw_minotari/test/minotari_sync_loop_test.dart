@@ -5,6 +5,68 @@ import "package:fake_async/fake_async.dart";
 import "package:flutter_test/flutter_test.dart";
 
 void main() {
+  test("one background pass drains events and refresh without scheduling another scan", () {
+    fakeAsync((clock) {
+      final stream = StreamController<int>(onCancel: Future<void>.value);
+      final refresh = Completer<void>();
+      var scans = 0;
+      var completed = false;
+      var synced = 0;
+      final events = <int>[];
+      final loop = MinotariSyncLoop<int>(
+        scan: (_) async {
+          scans++;
+          return stream.stream;
+        },
+        onEvent: (event, _) async => events.add(event),
+        refresh: (_) => refresh.future,
+        onSynced: () => synced++,
+        onError: (error, _) => fail("$error"),
+      );
+      unawaited(loop.runOnce().then((_) => completed = true));
+      clock.flushMicrotasks();
+      stream.add(1);
+      stream.add(2);
+      unawaited(stream.close());
+      clock.flushMicrotasks();
+      expect(events, [1, 2]);
+      expect(completed, isFalse);
+      refresh.complete();
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(minutes: 5));
+      expect(completed, isTrue);
+      expect(synced, 1);
+      expect(scans, 1);
+      expect(clock.pendingTimers, isEmpty);
+    });
+  });
+
+  test("failed background pass reports failure without an automatic retry", () {
+    fakeAsync((clock) {
+      var scans = 0;
+      final errors = <Object>[];
+      final loop = MinotariSyncLoop<int>(
+        scan: (_) async {
+          scans++;
+          throw StateError("offline");
+        },
+        onEvent: (_, __) async {},
+        refresh: (_) async => fail("Failed scan must not refresh"),
+        onSynced: () => fail("Failed scan must not sync"),
+        onError: (error, _) => errors.add(error),
+      );
+      unawaited(loop.runOnce());
+      clock.flushMicrotasks();
+      clock.elapse(const Duration(minutes: 5));
+      expect(scans, 1);
+      expect(errors, hasLength(1));
+      expect(clock.pendingTimers, isEmpty);
+      unawaited(loop.runOnce());
+      clock.flushMicrotasks();
+      expect(scans, 2); // A later OS job explicitly retries.
+    });
+  });
+
   test("waits for events and refresh, then waits 20 seconds without overlap", () {
     fakeAsync((clock) {
       final streams = <StreamController<int>>[];

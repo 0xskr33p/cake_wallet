@@ -167,13 +167,14 @@ void main() {
     await expectLater(service.remove('remove-me'), throwsStateError);
     await expectPreserved();
     expect(api.accounts, contains('remove-me'));
-    expect(api.calls, ['list']);
+    // A newly acquired native lease may reinitialize the shared DB first.
+    expect(api.calls.where((call) => call != 'init'), ['list']);
   });
 
   test('resumes file and metadata cleanup after native account was deleted', () async {
     api.accounts.remove('remove-me');
     await service.remove('remove-me');
-    expect(api.calls, ['list']);
+    expect(api.calls.where((call) => call != 'init'), ['list']);
     expect(await target.exists(), isFalse);
     expect(await WalletInfo.get('remove-me', WalletType.minotari), isNull);
     expect(await keeper.exists(), isTrue);
