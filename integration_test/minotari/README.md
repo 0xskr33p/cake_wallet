@@ -5,7 +5,7 @@ Cake's shared create/restore suites already iterate over enabled wallet types.
 fixture, so restore no longer silently skips this currency. The shared suites
 retain their default network behavior; a Tari mnemonic does not encode a network.
 
-The dedicated mobile suite covers the same core cases on **Esmeralda**:
+The dedicated suite covers the same core cases on **Esmeralda**:
 
 - Create through Cake's normal screens and real native wallet service; check the
   network, 24-word seed, address and zero balance.
@@ -86,6 +86,16 @@ The shared helper also references the other currencies' existing generated
 even when only XTM executes. No other currency's real seed is needed for this run.
 Compiled `.vec` assets, generated secrets, frameworks and test response output
 are build artifacts, not part of the XTM test source change.
+
+## Running on desktop
+
+See [Minotari desktop builds](../../cw_minotari/DESKTOP.md) for native packaging
+and desktop test prerequisites. macOS uses the same temporary path-provider
+profile as mobile. Linux additionally requires a new empty `/tmp/xtm-integration-*`
+directory via `CAKE_WALLET_DIR` and isolated XDG paths; the test checks these
+before starting Cake. The seed-screen robot scrolls lazy grid rows before
+asserting words, so a small desktop window does not omit later seed words.
+The driver report records the operating system and native ABI.
 
 After testing, rebuild the native library for the network of the ordinary app
 (normally `bash scripts/ios/build_minotari.sh mainnet`) and rebuild/relaunch the

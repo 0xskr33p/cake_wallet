@@ -1,3 +1,4 @@
+import "dart:ffi" show Abi;
 import "dart:io";
 
 import "package:cake_wallet/di.dart";
@@ -37,6 +38,7 @@ class _MinotariFlows extends CommonTestFlows {
 
   @override
   Future<void> setupPinCodeForWallet(List<int> pin) async {
+    if (Platform.isLinux) return; // Matches the shared flow: Linux has no PIN setup.
     final robot = SetupPinCodeRobot(tester);
     await robot.isSetupPinCodePage();
     await robot.enterPinCode(pin);
@@ -81,10 +83,29 @@ void main() {
 
   testWidgets("XTM Esmeralda: create, restore, reopen and display native balance", (tester) async {
     // Never reset a normal profile: every run gets new files and in-memory stores.
-    expect(Platform.environment["CAKE_WALLET_DIR"], anyOf(isNull, isEmpty),
-        reason: "CAKE_WALLET_DIR would override the isolated test profile");
-    final temporary = await getTemporaryDirectory();
-    final root = await Directory(temporary.path).createTemp("xtm-integration-");
+    final Directory root;
+    if (Platform.isLinux) {
+      // Linux's normal root selection deliberately bypasses path_provider. Use
+      // its existing env override, guarded before the app/database initializes.
+      final path = Platform.environment["CAKE_WALLET_DIR"];
+      expect(path, isNotNull, reason: "Linux needs a fresh /tmp/xtm-integration-* profile");
+      root = Directory(path!);
+      final temporary = await Directory.systemTemp.resolveSymbolicLinks();
+      expect(await root.resolveSymbolicLinks(), root.path);
+      expect(root.parent.path, temporary);
+      expect(root.uri.pathSegments.where((part) => part.isNotEmpty).last,
+          startsWith("xtm-integration-"));
+      expect(await root.list().isEmpty, isTrue, reason: "The Linux test profile must be empty");
+      expect(Platform.environment["XDG_DATA_HOME"], "${root.path}.xdg-data");
+      expect(Platform.environment["XDG_CONFIG_HOME"], "${root.path}.xdg-config");
+      setRootDirFromEnv();
+    } else {
+      expect(Platform.environment["CAKE_WALLET_DIR"], anyOf(isNull, isEmpty),
+          reason: "CAKE_WALLET_DIR would override the isolated test profile");
+      final temporary = await getTemporaryDirectory();
+      await temporary.create(recursive: true);
+      root = await Directory(temporary.path).createTemp("xtm-integration-");
+    }
     PathProviderPlatform.instance = _IsolatedPaths(root.path);
     SharedPreferences.setMockInitialValues({PreferencesKey.currentLanguageCode: "en"});
     FlutterSecureStorage.setMockInitialValues({});
@@ -181,7 +202,9 @@ void main() {
       "xtmNonZeroBalance": true,
       "network": "esmeralda",
       "liveChain": false,
-      "broadcast": false
+      "broadcast": false,
+      "platform": Platform.operatingSystem,
+      "abi": Abi.current().toString(),
     };
     await current().close();
   }, skip: !enabled, timeout: const Timeout(Duration(minutes: 8)));

@@ -1,5 +1,5 @@
 # Run from the Cake Wallet root:
-#   bash scripts/prepare_minotari.sh [--update]
+#   bash scripts/prepare_minotari.sh [--update] [--source-only]
 
 #######################################
 # Safety
@@ -12,11 +12,15 @@ set -u
 #######################################
 
 UPDATE_CW=0
+SOURCE_ONLY=0
 
 for arg in "$@"; do
   case "$arg" in
     --update)
       UPDATE_CW=1
+      ;;
+    --source-only)
+      SOURCE_ONLY=1
       ;;
   esac
 done
@@ -71,8 +75,15 @@ fi
     git fetch "$CW_REPO_URL" "$CW_REPO_REV" || exit 1
   fi
   git checkout --detach "$CW_REPO_REV" || exit 1
-  cargo build --locked
+  if [ "$SOURCE_ONLY" -eq 0 ]; then
+    cargo build --locked
+  fi
 ) || { return 1 2>/dev/null || exit 1; }
+
+if [ "$SOURCE_ONLY" -eq 1 ]; then
+  echo "Minotari wrapper source ready at ${CW_REPO_REV}"
+  return 0 2>/dev/null || exit 0
+fi
 
 #######################################
 # Flutter Rust Bridge codegen
