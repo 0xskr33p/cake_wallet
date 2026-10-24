@@ -19,6 +19,7 @@ import 'package:cw_minotari/minotari_ffi.dart';
 import 'package:cw_minotari/minotari_sync_loop.dart';
 import 'package:cw_minotari/minotari_runtime.dart';
 import 'package:cw_minotari/minotari_transaction_status.dart';
+import 'package:cw_minotari/minotari_transaction_date.dart';
 import 'package:cw_minotari/minotari_transaction_history.dart';
 import 'package:cw_minotari/minotari_transaction_info.dart';
 import 'package:cw_minotari/minotari_transaction_priority.dart';
@@ -66,6 +67,7 @@ abstract class MinotariWalletBase
   MinotariFfi? _ffi;
   bool _isTransactionUpdating;
   bool _historyNeedsReload = true;
+  bool _restoringHistory = false;
   int _historyGeneration = 0;
   final _historyUpdates = MinotariHistoryUpdateQueue();
   late final _balanceUpdates = MinotariBalanceUpdater(
@@ -159,6 +161,7 @@ abstract class MinotariWalletBase
 
       // Open the existing wallet database with the correct network
       await _ffi?.open(network);
+      _restoringHistory = walletInfo.isRecovery;
 
       // Get the wallet address from the Rust layer (it's persisted there)
       final address = await _ffi?.getAddress(passphrase: passphrase ?? '');
@@ -294,7 +297,28 @@ abstract class MinotariWalletBase
     // PR #149 runs the upstream monitor before the scan completes. Consume its
     // changes; do not recalculate confirmations independently in Cake Wallet.
     try {
-      await _updateHistoryChanges(isCurrent);
+      if (_restoringHistory && _scanCompleted) {
+        await _runHistoryUpdate(isCurrent, () async {
+          // The post-scan monitor has supplied final statuses. Replace preview
+          // rows as one snapshot, including those with no native status change.
+          _restoringHistory = false;
+          try {
+            await _loadTransactions(isCurrent: isCurrent);
+            if (!isCurrent()) {
+              _restoringHistory = true;
+              return;
+            }
+            walletInfo.isRecovery = false;
+            await walletInfo.save();
+          } catch (_) {
+            _restoringHistory = true;
+            walletInfo.isRecovery = true;
+            rethrow;
+          }
+        });
+      } else {
+        await _updateHistoryChanges(isCurrent);
+      }
     } finally {
       // A history read failure must not leave an independently readable balance stale.
       if (isCurrent()) {
@@ -835,7 +859,7 @@ abstract class MinotariWalletBase
         : TransactionDirection.outgoing;
 
     final isPending = minotariIsPending(txDto.status);
-    final date = DateTime.tryParse(txDto.blockchain.timestamp) ?? DateTime.now();
+    final date = parseMinotariTransactionDate(txDto.blockchain.timestamp) ?? DateTime.now();
     final fee = txDto.fee?.amount.toInt();
 
     final txInfo = MinotariTransactionInfo(
@@ -854,6 +878,9 @@ abstract class MinotariWalletBase
     txInfo.additionalInfo['source'] = txDto.source.name;
     txInfo.additionalInfo['status'] = txDto.status.name;
     txInfo.additionalInfo['historyStatus'] = minotariHistoryStatus(txDto.status);
+    // Presentation only: native status, isPending, confirmations and balances
+    // remain unchanged until the scanner's confirmation monitor updates them.
+    txInfo.additionalInfo['restoringHistory'] = _restoringHistory && isPending;
     txInfo.additionalInfo['amountDisplay'] = txDto.amountDisplay;
 
     if (txDto.message != null && txDto.message!.isNotEmpty) {

@@ -19,6 +19,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _Info extends Fake implements WalletInfo {
   @override
+  bool get isRecovery => false;
+  @override
   String get name => 'synthetic-fee-test';
   @override
   WalletType get type => WalletType.minotari;
@@ -34,6 +36,28 @@ class _Info extends Fake implements WalletInfo {
 
 class _Encryption extends Fake implements EncryptionFileUtils {}
 
+class _RecoveryInfo extends _Info {
+  @override
+  bool isRecovery = true;
+  int saves = 0;
+  @override
+  Future<int> save() async => ++saves;
+}
+
+DisplayedTransactionDto _receipt(String id, {bool confirmed = false}) => DisplayedTransactionDto(
+    id: id,
+    direction: DisplayedTransactionDirection.incoming,
+    source: DisplayedTransactionSource.transfer,
+    status:
+        confirmed ? DisplayedTransactionStatus.confirmed : DisplayedTransactionStatus.unconfirmed,
+    amount: BigInt.from(7000000),
+    amountDisplay: '7.000000 XTM',
+    blockchain: BlockchainInfoDto(
+        blockHeight: BigInt.from(100),
+        timestamp: '2026-10-24 07:31:56',
+        confirmations: BigInt.from(confirmed ? 3 : 0)),
+    payrefs: []);
+
 class _Api extends Fake implements RustLibApi {
   int scans = 0;
   int stops = 0;
@@ -43,6 +67,7 @@ class _Api extends Fake implements RustLibApi {
   Completer<void>? tipStarted;
   StreamController<ScanEventDto>? active;
   Future<void> Function()? beforeSnapshot;
+  List<DisplayedTransactionDto> rows = [];
   @override
   Future<void> crateApiDbInitializeDatabase({required String path}) async {}
   @override
@@ -67,7 +92,7 @@ class _Api extends Fake implements RustLibApi {
       {required String walletName, required int limit, required int offset}) async {
     snapshots++;
     await beforeSnapshot?.call();
-    return [];
+    return rows;
   }
 
   @override
@@ -75,6 +100,7 @@ class _Api extends Fake implements RustLibApi {
     tipStarted?.complete();
     return tip ?? Future.value(null);
   }
+
   @override
   Stream<ScanEventDto> crateApiScannerStartScan({required ScanConfiguration config}) {
     expect(config.continuous, isFalse);
@@ -102,6 +128,7 @@ void main() {
     expect(await MinotariRuntime.instance.beginBackground(), isTrue);
     api.scans = api.stops = api.snapshots = 0;
     api.beforeSnapshot = null;
+    api.rows = [];
     api.finishOnStop = true;
     api.tip = null;
     api.tipStarted = null;
@@ -122,6 +149,69 @@ void main() {
     }
     expect(api.active, isNotNull);
   }
+
+  Future<_RecoveryInfo> restorePreview() async {
+    await wallet.close();
+    api.active = null;
+    final info = _RecoveryInfo();
+    api.rows = [_receipt('old'), _receipt('fresh')];
+    wallet =
+        MinotariWallet(info, DerivationInfo(), password: '', encryptionFileUtils: _Encryption());
+    await wallet.init();
+    await wallet.connectToNode(node: Node(uri: 'rpc.invalid:443', type: WalletType.minotari));
+    return info;
+  }
+
+  test('restore preview ends atomically and retains genuinely unconfirmed receipts', () async {
+    final info = await restorePreview();
+    final old = wallet.transactionHistory.transactions['old']!;
+    expect(old.additionalInfo['restoringHistory'], isTrue);
+    expect(old.isPending, isTrue); // Presentation never changes native pending state.
+    final task = wallet.startBackgroundSync();
+    await waitForScan();
+    api.rows = [_receipt('old', confirmed: true), _receipt('fresh')];
+    api.active!.add(ScanEventDto.status(ScanStatusDto.completed(
+        accountId: 1, finalHeight: BigInt.from(103), totalBlocksScanned: BigInt.from(3))));
+    await api.active!.close();
+    await task;
+    expect(info.isRecovery, isFalse);
+    expect(info.saves, 1);
+    expect(wallet.transactionHistory.transactions, hasLength(2));
+    final finalOld = wallet.transactionHistory.transactions['old']!;
+    final fresh = wallet.transactionHistory.transactions['fresh']!;
+    expect(finalOld.additionalInfo['restoringHistory'], isFalse);
+    expect(finalOld.isPending, isFalse);
+    expect(fresh.additionalInfo['restoringHistory'], isFalse);
+    expect(fresh.isPending, isTrue);
+    expect(finalOld.date.toUtc(), DateTime.utc(2026, 10, 24, 7, 31, 56));
+  });
+
+  test('failed restore keeps preview and retries the final snapshot', () async {
+    final info = await restorePreview();
+    final failed = wallet.startBackgroundSync();
+    final expectation = expectLater(failed, throwsStateError);
+    await waitForScan();
+    api.beforeSnapshot = () async => throw StateError('synthetic history read failure');
+    api.active!.add(ScanEventDto.status(ScanStatusDto.completed(
+        accountId: 1, finalHeight: BigInt.from(103), totalBlocksScanned: BigInt.from(3))));
+    await api.active!.close();
+    await expectation;
+    expect(info.isRecovery, isTrue);
+    expect(info.saves, 0);
+    expect(
+        wallet.transactionHistory.transactions['old']!.additionalInfo['restoringHistory'], isTrue);
+    api.beforeSnapshot = null;
+    api.active = null;
+    final retry = wallet.startBackgroundSync();
+    await waitForScan();
+    api.active!.add(ScanEventDto.status(ScanStatusDto.completed(
+        accountId: 1, finalHeight: BigInt.from(103), totalBlocksScanned: BigInt.zero)));
+    await api.active!.close();
+    await retry;
+    expect(info.isRecovery, isFalse);
+    expect(
+        wallet.transactionHistory.transactions['old']!.additionalInfo['restoringHistory'], isFalse);
+  });
 
   test('background waits for stream drain and final history before reporting synced', () async {
     api.active = null;

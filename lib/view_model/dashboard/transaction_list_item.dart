@@ -59,6 +59,11 @@ class TransactionListItem extends ActionListItem with Keyable {
     if (balanceViewModel.wallet.type == WalletType.minotari) {
       final status = transaction.additionalInfo['historyStatus'] as String?;
       if (status != null) return status;
+      if (transaction.additionalInfo['restoringHistory'] == true) {
+        return transaction.direction == TransactionDirection.incoming
+            ? S.current.received
+            : S.current.sent;
+      }
     }
     if (balanceViewModel.wallet.type == WalletType.bitcoin &&
         transaction.additionalInfo['hasMissingInputTx'] == true) {

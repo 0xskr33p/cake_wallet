@@ -68,6 +68,10 @@ String _minotariInfo(TransactionDetailsViewModelBase vm, String field) =>
 bool _hasMinotariInfo(TransactionDetailsViewModelBase vm, String field) =>
     vm.wallet.type == WalletType.minotari && _minotariInfo(vm, field).isNotEmpty;
 
+bool _isMinotariRestorePreview(TransactionDetailsViewModelBase vm) =>
+    vm.wallet.type == WalletType.minotari &&
+    vm.transactionInfo.additionalInfo['restoringHistory'] == true;
+
 class TxDetailRowDefinition {
   TxDetailRowDefinition({
     required this.keyString,
@@ -122,13 +126,18 @@ class TxDetailRowDefinition {
             WalletType.monero,
             WalletType.minotari
           ].contains(vm.wallet.type) &&
-          !isLightning(vm.transactionInfo),
+          !isLightning(vm.transactionInfo) &&
+          !_isMinotariRestorePreview(vm),
       listItemBuilder: ConfirmationsListItem.new,
     ),
     TxDetailRowDefinition(
       keyString: "standard_list_item_transaction_details_status_key",
       title: "Status",
-      valueGetter: (vm) => _minotariInfo(vm, "status"),
+      valueGetter: (vm) => _isMinotariRestorePreview(vm)
+          ? vm.transactionInfo.direction == TransactionDirection.incoming
+              ? S.current.received
+              : S.current.sent
+          : _minotariInfo(vm, "status"),
       applicable: (vm) => _hasMinotariInfo(vm, "status"),
     ),
     TxDetailRowDefinition(
@@ -457,6 +466,7 @@ abstract class TransactionDetailsViewModelBase with Store {
   }
 
   String get formattedStatus {
+    if (_isMinotariRestorePreview(this)) return "";
     if ([
       WalletType.monero,
       WalletType.haven,

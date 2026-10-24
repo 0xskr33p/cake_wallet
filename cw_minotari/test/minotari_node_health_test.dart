@@ -10,6 +10,8 @@ import "package:flutter_test/flutter_test.dart";
 
 class _WalletInfo extends Fake implements WalletInfo {
   @override
+  bool get isRecovery => false;
+  @override
   Future<Set<String>> getUsedAddresses() async => {};
 
   @override
