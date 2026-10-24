@@ -18,6 +18,7 @@ import "package:cw_core/wallet_service.dart";
 import "package:cw_core/wallet_type.dart";
 import "package:cw_minotari/minotari_wallet.dart";
 import "package:cw_minotari/minotari_wallet_service.dart";
+import "package:cw_minotari/src/rust/api/db.dart" as native_db;
 import "package:flutter/material.dart";
 import "package:flutter_secure_storage/flutter_secure_storage.dart";
 import "package:flutter_test/flutter_test.dart";
@@ -175,6 +176,11 @@ void main() {
     // Deterministic ledger fixture, not a live-chain payment or a mock wallet.
     final path = "${await pathForWalletTypeDir(type: WalletType.minotari)}/wallet.db";
     expect(path, startsWith(root.path));
+    // The platform SQLite driver and Rust's bundled SQLite must not access the
+    // same file concurrently. Drain the scanner and close the native pool before
+    // the fixture writer takes ownership, then reopen it for the actual assertion.
+    await current().stopSync();
+    await native_db.disconnectDatabase();
     final db = await openDatabase(path, singleInstance: false);
     try {
       final account = (await db.query("accounts",
@@ -192,6 +198,7 @@ void main() {
       });
     } finally {
       await db.close();
+      await native_db.initializeDatabase(path: path);
     }
     await expectBalance("2.500001", 2500001);
     binding.reportData = {
